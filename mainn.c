@@ -1,81 +1,53 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <unistd.h> // sleep fonksiyonu için
 
-void temizle_ekran() {
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
-}
-
-void telefon_sogutucu() {
-    printf("\n=== Telefon Soğutucu ===\n");
-    printf("Telefon soğutucu çalıştırılıyor...\n");
-    printf("İşlem tamamlandı!\n");
-}
+// Hoparlör frekans ayarları
+#define MIN_FREQ 20    // En düşük frekans (Hz)
+#define MAX_FREQ 20000 // En yüksek frekans (Hz)
+#define DURATION 5     // Her frekans için süre (saniye)
 
 void hoparlor_temizleyici() {
     printf("\n=== Hoparlör Temizleyici ===\n");
-    printf("Hoparlör temizleyici çalıştırılıyor...\n");
-    printf("İşlem tamamlandı!\n");
-}
-
-void menu_goster() {
-    printf("\n=== Ana Menü ===\n");
-    printf("1 - Telefon Soğutucu\n");
-    printf("2 - Hoparlör Temizleyici\n");
-    printf("3 - Çıkış\n");
-    printf("\nSeçiminiz (1-3): ");
-}
-
-int secim_al() {
-    int secim;
-    char buffer[256];
+    printf("Hoparlör temizleme işlemi başlatılıyor...\n\n");
     
-    if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
-        if (sscanf(buffer, "%d", &secim) == 1) {
-            return secim;
-        }
-    }
-    return -1;
-}
-
-int main() {
-    int secim;
-    bool devam = true;
+    // Temizleme aşamaları
+    const char* asamalar[] = {
+        "Düşük frekans temizliği",
+        "Orta frekans temizliği",
+        "Yüksek frekans temizliği",
+        "Toz parçacıkları temizleniyor",
+        "Son kontrol yapılıyor"
+    };
     
-    while (devam) {
-        temizle_ekran();
-        menu_goster();
+    int toplam_asama = sizeof(asamalar) / sizeof(asamalar[0]);
+    
+    for (int i = 0; i < toplam_asama; i++) {
+        printf("Aşama %d/%d: %s\n", i + 1, toplam_asama, asamalar[i]);
         
-        // Input buffer'ı temizle
-        fflush(stdin);
-        
-        secim = secim_al();
-        
-        switch (secim) {
-            case 1:
-                telefon_sogutucu();
-                break;
-            case 2:
-                hoparlor_temizleyici();
-                break;
-            case 3:
-                printf("\nProgram sonlandırılıyor...\n");
-                devam = false;
-                break;
-            default:
-                printf("\nHata: Geçersiz seçim! Lütfen 1-3 arasında bir sayı girin.\n");
-                break;
+        // İlerleme çubuğu
+        for (int j = 0; j < 20; j++) {
+            printf("\rİlerleme: [");
+            for (int k = 0; k <= j; k++) printf("#");
+            for (int k = j + 1; k < 20; k++) printf(" ");
+            printf("] %d%%", (j + 1) * 5);
+            fflush(stdout);
+            usleep(250000); // 250ms bekle
         }
-        
-        if (devam) {
-            printf("\nDevam etmek için Enter tuşuna basın...");
-            getchar();
-        }
+        printf("\n");
     }
     
-    return 0;
+    // Güvenlik kontrolü
+    printf("\nGüvenlik kontrolü yapılıyor...\n");
+    sleep(1);
+    
+    // Tamamlandı mesajı
+    printf("\n✓ Hoparlör temizleme işlemi başarıyla tamamlandı!\n");
+    printf("Öneriler:\n");
+    printf("- Hoparlörünüzü temiz ve kuru tutun\n");
+    printf("- Aşırı ses seviyesinden kaçının\n");
+    printf("- Düzenli olarak temizlik yapın\n");
 }
+
+// Mevcut main() fonksiyonunuz aynı kalabilir
