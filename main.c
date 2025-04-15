@@ -1,286 +1,256 @@
+// ağ_izleyici.c
+#include <pcap.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <time.h>
-#include <stdbool.h>
-#include <math.h>
 #include <string.h>
+#include <time.h>
+#include <signal.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/if_ether.h>
+#include <net/ethernet.h>
 
-// Advanced color coding system
-#define ANSI_COLOR_RED     "\x1b[31m"
-#define ANSI_COLOR_GREEN   "\x1b[32m"
-#define ANSI_COLOR_YELLOW  "\x1b[33m"
-#define ANSI_COLOR_BLUE    "\x1b[34m"
-#define ANSI_COLOR_MAGENTA "\x1b[35m"
-#define ANSI_COLOR_CYAN    "\x1b[36m"
-#define ANSI_COLOR_RESET   "\x1b[0m"
-#define ANSI_BOLD          "\x1b[1m"
+// Global değişkenler
+static volatile int calisiyor = 1;
+static unsigned long toplam_paket = 0;
+static unsigned long tcp_paket = 0;
+static unsigned long udp_paket = 0;
+static unsigned long icmp_paket = 0;
+static unsigned long diger_paket = 0;
+static FILE *kayit_dosyasi = NULL;
 
-// Enhanced system constants
-#define MIN_TEMP 20.0
-#define MAX_TEMP 45.0
-#define CRITICAL_TEMP 38.0
-#define OPTIMAL_TEMP 28.0
-#define MIN_FAN_SPEED 0
-#define MAX_FAN_SPEED 150
-#define STARTUP_DELAY 0.5
-#define FAN_SPEED_STEPS 10
-#define TEMP_HISTORY_SIZE 60
-#define DATA_LOG_FILE "cooling_log.csv"
-#define CONFIG_FILE "cooler_config.ini"
-
-// Advanced performance profiles
-typedef enum {
-    ECO_MODE,
-    BALANCED,
-    PERFORMANCE,
-    TURBO,
-    SILENT,
-    SMART_AUTO,
-    CUSTOM
-} CoolingProfile;
-
-// Temperature zones
-typedef enum {
-    ZONE_COLD,
-    ZONE_OPTIMAL,
-    ZONE_WARM,
-    ZONE_HOT,
-    ZONE_CRITICAL
-} TempZone;
-
-// Advanced cooling state structure
+// IP istatistikleri için yapı
 typedef struct {
-    float current_temp;
-    float temp_history[TEMP_HISTORY_SIZE];
-    int temp_history_index;
-    int fan_speed;
-    bool is_cooling;
-    CoolingProfile profile;
-    time_t last_temp_check;
-    float temp_trend;
-    unsigned long runtime_seconds;
-    struct {
-        float total_power_used;
-        float cooling_efficiency;
-        int thermal_throttle_events;
-    } statistics;
-    struct {
-        float fan_curve[5];
-        float temp_thresholds[5];
-        int custom_max_fan_speed;
-    } custom_settings;
-} CoolerState;
+    char kaynak_ip[16];
+    char hedef_ip[16];
+    unsigned int sayac;
+} ip_istatistik;
 
-// Function prototypes
-void initializeState(CoolerState *state);
-void saveConfiguration(const CoolerState *state);
-void loadConfiguration(CoolerState *state);
-void logCoolingData(const CoolerState *state);
-float calculateCoolingEfficiency(const CoolerState *state);
-void updateThermalTrend(CoolerState *state);
-void displayDetailedStats(const CoolerState *state);
-void configureFanCurve(CoolerState *state);
-void emergencyCooling(CoolerState *state);
+#define MAKS_IP_ISTATISTIK 1000
+ip_istatistik ip_istatistikleri[MAKS_IP_ISTATISTIK];
+int ip_istatistik_sayisi = 0;
 
-// Initialize the cooling system state
-void initializeState(CoolerState *state) {
-    memset(state, 0, sizeof(CoolerState));
-    state->profile = BALANCED;
-    state->current_temp = simulateTemperature(state);
-    state->cooling_efficiency = 100.0;
-    
-    // Initialize custom fan curve
-    float default_curve[5] = {20.0, 40.0, 60.0, 80.0, 100.0};
-    float default_thresholds[5] = {25.0, 30.0, 35.0, 38.0, 40.0};
-    memcpy(state->custom_settings.fan_curve, default_curve, sizeof(default_curve));
-    memcpy(state->custom_settings.temp_thresholds, default_thresholds, sizeof(default_thresholds));
-    state->custom_settings.custom_max_fan_speed = MAX_FAN_SPEED;
-    
-    loadConfiguration(state);
+void sinyal_yakalayici(int signo) {
+    calisiyor = 0;
 }
 
-// Advanced temperature simulation
-float simulateTemperature(CoolerState *state) {
-    if (!state->is_cooling) {
-        return state->current_temp + (((float)rand() / RAND_MAX) * 2.0 - 0.5);
-    }
-
-    float cooling_effect = (float)state->fan_speed / MAX_FAN_SPEED;
-    float ambient_factor = sinf((float)time(NULL) / 3600.0) * 2.0; // Daily temperature cycle
-    float workload_factor = ((float)rand() / RAND_MAX) * 3.0; // Random workload variation
-    
-    float new_temp = state->current_temp;
-    new_temp += workload_factor;
-    new_temp += ambient_factor;
-    new_temp -= (cooling_effect * 5.0);
-    
-    // Clamp temperature
-    return fmaxf(MIN_TEMP, fminf(MAX_TEMP, new_temp));
-}
-
-// Smart fan speed controller
-void adjustFanSpeedAutomatically(CoolerState *state) {
-    updateThermalTrend(state);
-    
-    float target_speed = 0.0;
-    float temp_delta = state->current_temp - OPTIMAL_TEMP;
-    
-    switch (state->profile) {
-        case ECO_MODE:
-            target_speed = fmaxf(0, temp_delta * 5.0);
-            target_speed = fminf(target_speed, MAX_FAN_SPEED * 0.6);
+// IP istatistiklerini güncelleme
+void ip_istatistik_guncelle(const char *kaynak_ip, const char *hedef_ip) {
+    int bulundu = 0;
+    for (int i = 0; i < ip_istatistik_sayisi; i++) {
+        if (strcmp(ip_istatistikleri[i].kaynak_ip, kaynak_ip) == 0 &&
+            strcmp(ip_istatistikleri[i].hedef_ip, hedef_ip) == 0) {
+            ip_istatistikleri[i].sayac++;
+            bulundu = 1;
             break;
-            
-        case PERFORMANCE:
-            target_speed = fmaxf(20, temp_delta * 8.0);
-            target_speed = fminf(target_speed, MAX_FAN_SPEED * 0.9);
-            break;
-            
-        case TURBO:
-            target_speed = fmaxf(40, temp_delta * 10.0);
-            target_speed = fminf(target_speed, MAX_FAN_SPEED);
-            break;
-            
-        case SILENT:
-            target_speed = fmaxf(0, temp_delta * 3.0);
-            target_speed = fminf(target_speed, MAX_FAN_SPEED * 0.4);
-            break;
-            
-        case SMART_AUTO:
-            // Consider thermal trend
-            float trend_factor = state->temp_trend * 20.0;
-            target_speed = fmaxf(0, (temp_delta + trend_factor) * 6.0);
-            target_speed = fminf(target_speed, MAX_FAN_SPEED * 0.85);
-            break;
-            
-        case CUSTOM:
-            // Use custom fan curve
-            for (int i = 0; i < 5; i++) {
-                if (state->current_temp <= state->custom_settings.temp_thresholds[i]) {
-                    target_speed = state->custom_settings.fan_curve[i];
-                    break;
-                }
-            }
-            target_speed = fminf(target_speed, state->custom_settings.custom_max_fan_speed);
-            break;
-            
-        default: // BALANCED
-            target_speed = fmaxf(10, temp_delta * 6.0);
-            target_speed = fminf(target_speed, MAX_FAN_SPEED * 0.75);
-    }
-    
-    // Smooth transition
-    float speed_diff = target_speed - state->fan_speed;
-    state->fan_speed += (int)(speed_diff * 0.2);
-    
-    // Emergency override
-    if (state->current_temp >= CRITICAL_TEMP) {
-        emergencyCooling(state);
-    }
-}
-
-// Emergency cooling procedure
-void emergencyCooling(CoolerState *state) {
-    state->fan_speed = MAX_FAN_SPEED;
-    state->statistics.thermal_throttle_events++;
-    printf(ANSI_COLOR_RED ANSI_BOLD "\nKRİTİK SICAKLIK UYARISI! Acil soğutma başlatıldı!\n" ANSI_COLOR_RESET);
-    logCoolingData(state);
-}
-
-// Update thermal trend analysis
-void updateThermalTrend(CoolerState *state) {
-    state->temp_history[state->temp_history_index] = state->current_temp;
-    state->temp_history_index = (state->temp_history_index + 1) % TEMP_HISTORY_SIZE;
-    
-    float sum = 0;
-    for (int i = 0; i < TEMP_HISTORY_SIZE; i++) {
-        sum += state->temp_history[i];
-    }
-    float avg = sum / TEMP_HISTORY_SIZE;
-    state->temp_trend = state->current_temp - avg;
-}
-
-// Display detailed statistics
-void displayDetailedStats(const CoolerState *state) {
-    printf("\n%s=== Detaylı Sistem İstatistikleri ===%s\n", ANSI_COLOR_CYAN, ANSI_COLOR_RESET);
-    printf("Çalışma Süresi: %lu saat %lu dakika\n", 
-           state->runtime_seconds / 3600, (state->runtime_seconds % 3600) / 60);
-    printf("Toplam Güç Kullanımı: %.2f Watt\n", state->statistics.total_power_used);
-    printf("Soğutma Verimliliği: %.1f%%\n", state->statistics.cooling_efficiency);
-    printf("Termal Limit Olayları: %d\n", state->statistics.thermal_throttle_events);
-    printf("Sıcaklık Trendi: %s%.1f°C/saat%s\n", 
-           state->temp_trend > 0 ? ANSI_COLOR_RED : ANSI_COLOR_GREEN,
-           state->temp_trend * 3600,
-           ANSI_COLOR_RESET);
-}
-
-// Enhanced menu system
-void printEnhancedMenu(void) {
-    printf("\n%s%s=== Gelişmiş Soğutma Kontrol Sistemi ===%s\n",
-           ANSI_BOLD, ANSI_COLOR_BLUE, ANSI_COLOR_RESET);
-    printf("1. Soğutucuyu Başlat\n");
-    printf("2. Sıcaklık ve Fan Durumu\n");
-    printf("3. Soğutma Profili Seç\n");
-    printf("4. Özel Fan Eğrisi Ayarla\n");
-    printf("5. Detaylı İstatistikler\n");
-    printf("6. Yapılandırmayı Kaydet\n");
-    printf("7. Acil Durum Soğutma\n");
-    printf("8. Çıkış\n");
-    printf("\nSeçiminiz: ");
-}
-
-// Main function with enhanced menu handling
-int main(void) {
-    srand(time(NULL));
-    CoolerState state;
-    initializeState(&state);
-    
-    while (true) {
-        if (!clearScreen()) {
-            return ERROR_SYSTEM_CALL;
         }
-        
-        printEnhancedMenu();
-        int choice = getMenuChoice();
-        
-        switch (choice) {
-            case 1:
-                startCooling(&state);
-                break;
-            case 2:
-                showDetailedStatus(&state);
-                break;
-            case 3:
-                selectCoolingProfile(&state);
-                break;
-            case 4:
-                configureFanCurve(&state);
-                break;
-            case 5:
-                displayDetailedStats(&state);
-                break;
-            case 6:
-                saveConfiguration(&state);
-                break;
-            case 7:
-                emergencyCooling(&state);
-                break;
-            case 8:
-                printf("\nProgram sonlandırılıyor...\n");
-                saveConfiguration(&state);
-                return SUCCESS;
-            default:
-                printf(ANSI_COLOR_RED "\nGeçersiz seçim!\n" ANSI_COLOR_RESET);
-                sleep(1);
-        }
-        
-        // Update system state
-        state.runtime_seconds += 1;
-        state.current_temp = simulateTemperature(&state);
-        if (state.is_cooling) {
-            adjustFanSpeedAutomatically(&state);
-        }
-        logCoolingData(&state);
     }
+    
+    if (!bulundu && ip_istatistik_sayisi < MAKS_IP_ISTATISTIK) {
+        strncpy(ip_istatistikleri[ip_istatistik_sayisi].kaynak_ip, kaynak_ip, 16);
+        strncpy(ip_istatistikleri[ip_istatistik_sayisi].hedef_ip, hedef_ip, 16);
+        ip_istatistikleri[ip_istatistik_sayisi].sayac = 1;
+        ip_istatistik_sayisi++;
+    }
+}
+
+// Ethernet başlığını yazdırma
+void ethernet_basligi_yazdir(const u_char *paket) {
+    struct ether_header *eth_basligi = (struct ether_header *)paket;
+    printf("Ethernet Başlığı:\n");
+    printf("   Kaynak MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+           eth_basligi->ether_shost[0], eth_basligi->ether_shost[1],
+           eth_basligi->ether_shost[2], eth_basligi->ether_shost[3],
+           eth_basligi->ether_shost[4], eth_basligi->ether_shost[5]);
+    printf("   Hedef MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+           eth_basligi->ether_dhost[0], eth_basligi->ether_dhost[1],
+           eth_basligi->ether_dhost[2], eth_basligi->ether_dhost[3],
+           eth_basligi->ether_dhost[4], eth_basligi->ether_dhost[5]);
+}
+
+// Paket işleyici
+void paket_isleyici(u_char *args, const struct pcap_pkthdr *baslik, const u_char *paket) {
+    struct ip *ip_basligi = (struct ip *)(paket + ETHER_HDR_LEN);
+    char zaman_damgasi[26];
+    time_t simdi = time(NULL);
+    strftime(zaman_damgasi, sizeof(zaman_damgasi), "%Y-%m-%d %H:%M:%S", localtime(&simdi));
+    
+    toplam_paket++;
+
+    printf("\n=== Paket #%lu Yakalandı: %s ===\n", toplam_paket, zaman_damgasi);
+    printf("Paket Uzunluğu: %d bayt\n", baslik->len);
+    
+    ethernet_basligi_yazdir(paket);
+    
+    char kaynak_ip[INET_ADDRSTRLEN], hedef_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(ip_basligi->ip_src), kaynak_ip, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &(ip_basligi->ip_dst), hedef_ip, INET_ADDRSTRLEN);
+    
+    printf("IP Başlığı:\n");
+    printf("   Sürüm: %d\n", ip_basligi->ip_v);
+    printf("   Başlık Uzunluğu: %d bayt\n", ip_basligi->ip_hl * 4);
+    printf("   Kaynak IP: %s\n", kaynak_ip);
+    printf("   Hedef IP: %s\n", hedef_ip);
+    printf("   TTL: %d\n", ip_basligi->ip_ttl);
+    
+    ip_istatistik_guncelle(kaynak_ip, hedef_ip);
+
+    switch (ip_basligi->ip_p) {
+        case IPPROTO_TCP: {
+            tcp_paket++;
+            struct tcphdr *tcp_basligi = (struct tcphdr *)(paket + ETHER_HDR_LEN + ip_basligi->ip_hl * 4);
+            printf("Protokol: TCP\n");
+            printf("   Kaynak Port: %d\n", ntohs(tcp_basligi->source));
+            printf("   Hedef Port: %d\n", ntohs(tcp_basligi->dest));
+            printf("   Sıra Numarası: %u\n", ntohl(tcp_basligi->seq));
+            printf("   ACK Numarası: %u\n", ntohl(tcp_basligi->ack_seq));
+            printf("   Bayraklar: ");
+            if (tcp_basligi->fin) printf("FIN ");
+            if (tcp_basligi->syn) printf("SYN ");
+            if (tcp_basligi->rst) printf("RST ");
+            if (tcp_basligi->psh) printf("PSH ");
+            if (tcp_basligi->ack) printf("ACK ");
+            if (tcp_basligi->urg) printf("URG ");
+            printf("\n");
+            break;
+        }
+        case IPPROTO_UDP: {
+            udp_paket++;
+            struct udphdr *udp_basligi = (struct udphdr *)(paket + ETHER_HDR_LEN + ip_basligi->ip_hl * 4);
+            printf("Protokol: UDP\n");
+            printf("   Kaynak Port: %d\n", ntohs(udp_basligi->source));
+            printf("   Hedef Port: %d\n", ntohs(udp_basligi->dest));
+            printf("   Uzunluk: %d\n", ntohs(udp_basligi->len));
+            break;
+        }
+        case IPPROTO_ICMP: {
+            icmp_paket++;
+            struct icmphdr *icmp_basligi = (struct icmphdr *)(paket + ETHER_HDR_LEN + ip_basligi->ip_hl * 4);
+            printf("Protokol: ICMP\n");
+            printf("   Tip: %d\n", icmp_basligi->type);
+            printf("   Kod: %d\n", icmp_basligi->code);
+            break;
+        }
+        default:
+            diger_paket++;
+            printf("Protokol: Diğer (%d)\n", ip_basligi->ip_p);
+            break;
+    }
+
+    if (kayit_dosyasi) {
+        fprintf(kayit_dosyasi, "%s,Paket #%lu,%s,%s,%d\n",
+                zaman_damgasi, toplam_paket, kaynak_ip, hedef_ip, ip_basligi->ip_p);
+        fflush(kayit_dosyasi);
+    }
+}
+
+void istatistikleri_yazdir() {
+    printf("\n=== Yakalama İstatistikleri ===\n");
+    printf("Toplam Paket: %lu\n", toplam_paket);
+    printf("TCP Paketleri: %lu (%%%.2f)\n", tcp_paket, (float)tcp_paket/toplam_paket*100);
+    printf("UDP Paketleri: %lu (%%%.2f)\n", udp_paket, (float)udp_paket/toplam_paket*100);
+    printf("ICMP Paketleri: %lu (%%%.2f)\n", icmp_paket, (float)icmp_paket/toplam_paket*100);
+    printf("Diğer Paketler: %lu (%%%.2f)\n", diger_paket, (float)diger_paket/toplam_paket*100);
+    
+    printf("\nEn Çok Görülen IP Bağlantıları:\n");
+    for (int i = 0; i < ip_istatistik_sayisi && i < 10; i++) {
+        printf("%s -> %s: %u paket\n",
+               ip_istatistikleri[i].kaynak_ip,
+               ip_istatistikleri[i].hedef_ip,
+               ip_istatistikleri[i].sayac);
+    }
+}
+
+int main() {
+    char hata_mesaji[PCAP_ERRBUF_SIZE];
+    pcap_if_t *tum_aygitlar, *aygit;
+    char kayit_dosyasi_adi[100];
+
+    signal(SIGINT, sinyal_yakalayici);
+
+    if (pcap_findalldevs(&tum_aygitlar, hata_mesaji) == -1) {
+        fprintf(stderr, "Aygıt bulma hatası: %s\n", hata_mesaji);
+        return 1;
+    }
+
+    printf("Kullanılabilir Ağ Arayüzleri:\n");
+    int aygit_sayisi = 0;
+    for (aygit = tum_aygitlar; aygit; aygit = aygit->next) {
+        printf("[%d] %s", ++aygit_sayisi, aygit->name);
+        if (aygit->description)
+            printf(" - %s", aygit->description);
+        printf("\n");
+    }
+
+    if (aygit_sayisi == 0) {
+        printf("Aygıt bulunamadı! Yetki seviyenizi kontrol edin.\n");
+        return 1;
+    }
+
+    int secim;
+    printf("\nArayüz seçin (1-%d): ", aygit_sayisi);
+    scanf("%d", &secim);
+
+    if (secim < 1 || secim > aygit_sayisi) {
+        printf("Geçersiz seçim. Çıkılıyor.\n");
+        return 1;
+    }
+
+    aygit = tum_aygitlar;
+    for (int i = 1; i < secim; i++) {
+        aygit = aygit->next;
+    }
+
+    snprintf(kayit_dosyasi_adi, sizeof(kayit_dosyasi_adi), "paket_yakala_%ld.csv", time(NULL));
+    kayit_dosyasi = fopen(kayit_dosyasi_adi, "w");
+    if (kayit_dosyasi) {
+        fprintf(kayit_dosyasi, "Zaman,Paket Numarası,Kaynak IP,Hedef IP,Protokol\n");
+    }
+
+    pcap_t *yakala = pcap_open_live(aygit->name, BUFSIZ, 1, 1000, hata_mesaji);
+    if (yakala == NULL) {
+        fprintf(stderr, "Aygıt açılamadı %s: %s\n", aygit->name, hata_mesaji);
+        return 1;
+    }
+
+    printf("Paket filtresi girin (örn: 'tcp', 'udp port 53', 'icmp' veya tümü için Enter): ");
+    char filtre[100];
+    getchar();
+    fgets(filtre, sizeof(filtre), stdin);
+    filtre[strcspn(filtre, "\n")] = 0;
+
+    if (strlen(filtre) > 0) {
+        struct bpf_program fp;
+        if (pcap_compile(yakala, &fp, filtre, 0, PCAP_NETMASK_UNKNOWN) == -1) {
+            fprintf(stderr, "Filtre derleme hatası: %s\n", pcap_geterr(yakala));
+            return 1;
+        }
+        if (pcap_setfilter(yakala, &fp) == -1) {
+            fprintf(stderr, "Filtre uygulama hatası: %s\n", pcap_geterr(yakala));
+            return 1;
+        }
+        printf("Filtre uygulandı: %s\n", filtre);
+    }
+
+    printf("\n%s üzerinde paket yakalama başlatılıyor...\n", aygit->name);
+    printf("Durdurmak için Ctrl+C'ye basın\n\n");
+
+    while (calisiyor) {
+        pcap_dispatch(yakala, -1, paket_isleyici, NULL);
+    }
+
+    istatistikleri_yazdir();
+
+    if (kayit_dosyasi) {
+        printf("\nYakalama kaydı şuraya kaydedildi: %s\n", kayit_dosyasi_adi);
+        fclose(kayit_dosyasi);
+    }
+    
+    pcap_close(yakala);
+    pcap_freealldevs(tum_aygitlar);
+    return 0;
 }
