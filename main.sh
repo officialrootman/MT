@@ -1,19 +1,29 @@
 #!/bin/bash
 
-# Sıcaklık sensöründen veri okuma (örnek: bir dosyadan veya komuttan)
+# Sıcaklık sensöründen veri okuma
 function read_temperature() {
-    # Örnek: Sıcaklığı rastgele bir sayı olarak simüle et
-    echo $((RANDOM % 50 + 20)) # 20°C ile 70°C arasında bir sıcaklık döndür
+    # Hata kontrolü
+    temperature=$((RANDOM % 50 + 20)) # 20°C ile 70°C arasında bir sıcaklık döndür
+    if [ -z "$temperature" ]; then
+        echo "Hata: Sıcaklık verisi okunamadı!"
+        exit 1
+    fi
+    echo "$temperature"
 }
 
 # Soğutucuyu kontrol etme
 function control_cooler() {
-    if [ "$1" -eq 1 ]; then
-        echo "Soğutucu açıldı."
-        # Burada gerçek donanım kontrol kodu yazılır (örneğin, GPIO veya fan kontrol komutları)
-    else
-        echo "Soğutucu kapatıldı."
-    fi
+    case "$1" in
+        1)
+            echo "Soğutucu açıldı."
+            ;;
+        0)
+            echo "Soğutucu kapatıldı."
+            ;;
+        *)
+            echo "Geçersiz giriş: $1"
+            ;;
+    esac
 }
 
 # Ana döngü
