@@ -1,256 +1,271 @@
-// ağ_izleyici.c
-#include <pcap.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <signal.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <netinet/ip.h>
-#include <netinet/tcp.h>
-#include <netinet/udp.h>
-#include <netinet/ip_icmp.h>
-#include <netinet/if_ether.h>
-#include <net/ethernet.h>
+#include <time.h>
+#include <signal.h>
+#include <sys/time.h>
+#include <pthread.h>
+#include <syslog.h>
+
+#define PORT 8080
+#define BUFFER_SIZE 4096
+#define MAX_CONNECTIONS 100
+#define LOG_FILE "honeypot.log"
+#define BANNED_IPS_FILE "banned_ips.txt"
+#define BAN_THRESHOLD 5
+#define BAN_DURATION 3600 // 1 saat
+
+typedef struct {
+    char ip[INET_ADDRLEN];
+    time_t last_attempt;
+    int attempt_count;
+} IPRecord;
 
 // Global değişkenler
-static volatile int calisiyor = 1;
-static unsigned long toplam_paket = 0;
-static unsigned long tcp_paket = 0;
-static unsigned long udp_paket = 0;
-static unsigned long icmp_paket = 0;
-static unsigned long diger_paket = 0;
-static FILE *kayit_dosyasi = NULL;
+IPRecord *ip_records;
+int ip_record_count = 0;
+pthread_mutex_t ip_mutex = PTHREAD_MUTEX_INITIALIZER;
+FILE *log_file;
 
-// IP istatistikleri için yapı
-typedef struct {
-    char kaynak_ip[16];
-    char hedef_ip[16];
-    unsigned int sayac;
-} ip_istatistik;
+// Fonksiyon prototipleri
+void setup_signal_handlers(void);
+void log_activity(const char *ip, const char *message, const char *payload);
+void check_and_ban_ip(const char *ip);
+int is_ip_banned(const char *ip);
+void save_banned_ips(void);
+void load_banned_ips(void);
+void cleanup(void);
 
-#define MAKS_IP_ISTATISTIK 1000
-ip_istatistik ip_istatistikleri[MAKS_IP_ISTATISTIK];
-int ip_istatistik_sayisi = 0;
+void log_activity(const char *ip, const char *message, const char *payload) {
+    time_t now;
+    struct tm *timeinfo;
+    char timestamp[64];
 
-void sinyal_yakalayici(int signo) {
-    calisiyor = 0;
+    time(&now);
+    timeinfo = localtime(&now);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
+
+    pthread_mutex_lock(&ip_mutex);
+    fprintf(log_file, "[%s] IP: %s - %s - Payload: %s\n", timestamp, ip, message, payload);
+    fflush(log_file);
+    pthread_mutex_unlock(&ip_mutex);
+    
+    // Sistem log'una da kaydet
+    syslog(LOG_AUTH | LOG_NOTICE, "Honeypot: %s - %s - %s", ip, message, payload);
 }
 
-// IP istatistiklerini güncelleme
-void ip_istatistik_guncelle(const char *kaynak_ip, const char *hedef_ip) {
-    int bulundu = 0;
-    for (int i = 0; i < ip_istatistik_sayisi; i++) {
-        if (strcmp(ip_istatistikleri[i].kaynak_ip, kaynak_ip) == 0 &&
-            strcmp(ip_istatistikleri[i].hedef_ip, hedef_ip) == 0) {
-            ip_istatistikleri[i].sayac++;
-            bulundu = 1;
+void handle_connection(int client_socket, struct sockaddr_in *client_addr) {
+    char buffer[BUFFER_SIZE] = {0};
+    char client_ip[INET_ADDRLEN];
+    char *responses[] = {
+        "Access Denied: Invalid credentials\n",
+        "Error: Service temporarily unavailable\n",
+        "Authentication failed: Please try again later\n",
+        "System is currently under maintenance\n"
+    };
+
+    inet_ntop(AF_INET, &(client_addr->sin_addr), client_ip, INET_ADDRLEN);
+
+    // IP'yi kontrol et
+    if (is_ip_banned(client_ip)) {
+        close(client_socket);
+        return;
+    }
+
+    // Gelen veriyi oku
+    int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
+    if (bytes_read > 0) {
+        buffer[bytes_read] = '\0';
+        
+        // Zararlı içerik kontrolü
+        if (strstr(buffer, "exec") || strstr(buffer, "bash") || 
+            strstr(buffer, "/bin/") || strstr(buffer, "passwd")) {
+            log_activity(client_ip, "Zararlı içerik tespit edildi", buffer);
+            check_and_ban_ip(client_ip);
+        }
+
+        // Aktiviteyi logla
+        log_activity(client_ip, "Gelen bağlantı", buffer);
+    }
+
+    // Rastgele sahte cevap seç
+    int response_index = rand() % (sizeof(responses) / sizeof(responses[0]));
+    send(client_socket, responses[response_index], strlen(responses[response_index]), 0);
+
+    // Gecikme ekle
+    usleep(rand() % 1000000 + 500000); // 0.5-1.5 saniye arası
+
+    close(client_socket);
+}
+
+void check_and_ban_ip(const char *ip) {
+    pthread_mutex_lock(&ip_mutex);
+    
+    int found = 0;
+    for (int i = 0; i < ip_record_count; i++) {
+        if (strcmp(ip_records[i].ip, ip) == 0) {
+            ip_records[i].attempt_count++;
+            ip_records[i].last_attempt = time(NULL);
+            found = 1;
+            
+            if (ip_records[i].attempt_count >= BAN_THRESHOLD) {
+                log_activity(ip, "IP engellendi", "Çok fazla deneme");
+                save_banned_ips();
+            }
             break;
         }
     }
-    
-    if (!bulundu && ip_istatistik_sayisi < MAKS_IP_ISTATISTIK) {
-        strncpy(ip_istatistikleri[ip_istatistik_sayisi].kaynak_ip, kaynak_ip, 16);
-        strncpy(ip_istatistikleri[ip_istatistik_sayisi].hedef_ip, hedef_ip, 16);
-        ip_istatistikleri[ip_istatistik_sayisi].sayac = 1;
-        ip_istatistik_sayisi++;
-    }
-}
 
-// Ethernet başlığını yazdırma
-void ethernet_basligi_yazdir(const u_char *paket) {
-    struct ether_header *eth_basligi = (struct ether_header *)paket;
-    printf("Ethernet Başlığı:\n");
-    printf("   Kaynak MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           eth_basligi->ether_shost[0], eth_basligi->ether_shost[1],
-           eth_basligi->ether_shost[2], eth_basligi->ether_shost[3],
-           eth_basligi->ether_shost[4], eth_basligi->ether_shost[5]);
-    printf("   Hedef MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           eth_basligi->ether_dhost[0], eth_basligi->ether_dhost[1],
-           eth_basligi->ether_dhost[2], eth_basligi->ether_dhost[3],
-           eth_basligi->ether_dhost[4], eth_basligi->ether_dhost[5]);
-}
-
-// Paket işleyici
-void paket_isleyici(u_char *args, const struct pcap_pkthdr *baslik, const u_char *paket) {
-    struct ip *ip_basligi = (struct ip *)(paket + ETHER_HDR_LEN);
-    char zaman_damgasi[26];
-    time_t simdi = time(NULL);
-    strftime(zaman_damgasi, sizeof(zaman_damgasi), "%Y-%m-%d %H:%M:%S", localtime(&simdi));
-    
-    toplam_paket++;
-
-    printf("\n=== Paket #%lu Yakalandı: %s ===\n", toplam_paket, zaman_damgasi);
-    printf("Paket Uzunluğu: %d bayt\n", baslik->len);
-    
-    ethernet_basligi_yazdir(paket);
-    
-    char kaynak_ip[INET_ADDRSTRLEN], hedef_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(ip_basligi->ip_src), kaynak_ip, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &(ip_basligi->ip_dst), hedef_ip, INET_ADDRSTRLEN);
-    
-    printf("IP Başlığı:\n");
-    printf("   Sürüm: %d\n", ip_basligi->ip_v);
-    printf("   Başlık Uzunluğu: %d bayt\n", ip_basligi->ip_hl * 4);
-    printf("   Kaynak IP: %s\n", kaynak_ip);
-    printf("   Hedef IP: %s\n", hedef_ip);
-    printf("   TTL: %d\n", ip_basligi->ip_ttl);
-    
-    ip_istatistik_guncelle(kaynak_ip, hedef_ip);
-
-    switch (ip_basligi->ip_p) {
-        case IPPROTO_TCP: {
-            tcp_paket++;
-            struct tcphdr *tcp_basligi = (struct tcphdr *)(paket + ETHER_HDR_LEN + ip_basligi->ip_hl * 4);
-            printf("Protokol: TCP\n");
-            printf("   Kaynak Port: %d\n", ntohs(tcp_basligi->source));
-            printf("   Hedef Port: %d\n", ntohs(tcp_basligi->dest));
-            printf("   Sıra Numarası: %u\n", ntohl(tcp_basligi->seq));
-            printf("   ACK Numarası: %u\n", ntohl(tcp_basligi->ack_seq));
-            printf("   Bayraklar: ");
-            if (tcp_basligi->fin) printf("FIN ");
-            if (tcp_basligi->syn) printf("SYN ");
-            if (tcp_basligi->rst) printf("RST ");
-            if (tcp_basligi->psh) printf("PSH ");
-            if (tcp_basligi->ack) printf("ACK ");
-            if (tcp_basligi->urg) printf("URG ");
-            printf("\n");
-            break;
-        }
-        case IPPROTO_UDP: {
-            udp_paket++;
-            struct udphdr *udp_basligi = (struct udphdr *)(paket + ETHER_HDR_LEN + ip_basligi->ip_hl * 4);
-            printf("Protokol: UDP\n");
-            printf("   Kaynak Port: %d\n", ntohs(udp_basligi->source));
-            printf("   Hedef Port: %d\n", ntohs(udp_basligi->dest));
-            printf("   Uzunluk: %d\n", ntohs(udp_basligi->len));
-            break;
-        }
-        case IPPROTO_ICMP: {
-            icmp_paket++;
-            struct icmphdr *icmp_basligi = (struct icmphdr *)(paket + ETHER_HDR_LEN + ip_basligi->ip_hl * 4);
-            printf("Protokol: ICMP\n");
-            printf("   Tip: %d\n", icmp_basligi->type);
-            printf("   Kod: %d\n", icmp_basligi->code);
-            break;
-        }
-        default:
-            diger_paket++;
-            printf("Protokol: Diğer (%d)\n", ip_basligi->ip_p);
-            break;
+    if (!found && ip_record_count < MAX_CONNECTIONS) {
+        strcpy(ip_records[ip_record_count].ip, ip);
+        ip_records[ip_record_count].attempt_count = 1;
+        ip_records[ip_record_count].last_attempt = time(NULL);
+        ip_record_count++;
     }
 
-    if (kayit_dosyasi) {
-        fprintf(kayit_dosyasi, "%s,Paket #%lu,%s,%s,%d\n",
-                zaman_damgasi, toplam_paket, kaynak_ip, hedef_ip, ip_basligi->ip_p);
-        fflush(kayit_dosyasi);
-    }
-}
-
-void istatistikleri_yazdir() {
-    printf("\n=== Yakalama İstatistikleri ===\n");
-    printf("Toplam Paket: %lu\n", toplam_paket);
-    printf("TCP Paketleri: %lu (%%%.2f)\n", tcp_paket, (float)tcp_paket/toplam_paket*100);
-    printf("UDP Paketleri: %lu (%%%.2f)\n", udp_paket, (float)udp_paket/toplam_paket*100);
-    printf("ICMP Paketleri: %lu (%%%.2f)\n", icmp_paket, (float)icmp_paket/toplam_paket*100);
-    printf("Diğer Paketler: %lu (%%%.2f)\n", diger_paket, (float)diger_paket/toplam_paket*100);
-    
-    printf("\nEn Çok Görülen IP Bağlantıları:\n");
-    for (int i = 0; i < ip_istatistik_sayisi && i < 10; i++) {
-        printf("%s -> %s: %u paket\n",
-               ip_istatistikleri[i].kaynak_ip,
-               ip_istatistikleri[i].hedef_ip,
-               ip_istatistikleri[i].sayac);
-    }
+    pthread_mutex_unlock(&ip_mutex);
 }
 
 int main() {
-    char hata_mesaji[PCAP_ERRBUF_SIZE];
-    pcap_if_t *tum_aygitlar, *aygit;
-    char kayit_dosyasi_adi[100];
+    int server_fd, new_socket;
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
 
-    signal(SIGINT, sinyal_yakalayici);
+    // Başlangıç ayarları
+    srand(time(NULL));
+    setup_signal_handlers();
+    ip_records = calloc(MAX_CONNECTIONS, sizeof(IPRecord));
+    log_file = fopen(LOG_FILE, "a");
+    load_banned_ips();
 
-    if (pcap_findalldevs(&tum_aygitlar, hata_mesaji) == -1) {
-        fprintf(stderr, "Aygıt bulma hatası: %s\n", hata_mesaji);
-        return 1;
+    // Soket oluştur
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("Soket oluşturulamadı");
+        exit(EXIT_FAILURE);
     }
 
-    printf("Kullanılabilir Ağ Arayüzleri:\n");
-    int aygit_sayisi = 0;
-    for (aygit = tum_aygitlar; aygit; aygit = aygit->next) {
-        printf("[%d] %s", ++aygit_sayisi, aygit->name);
-        if (aygit->description)
-            printf(" - %s", aygit->description);
-        printf("\n");
+    // SO_REUSEADDR ayarı
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("Bağlama hatası");
+        cleanup();
+        exit(EXIT_FAILURE);
     }
 
-    if (aygit_sayisi == 0) {
-        printf("Aygıt bulunamadı! Yetki seviyenizi kontrol edin.\n");
-        return 1;
+    if (listen(server_fd, 10) < 0) {
+        perror("Dinleme hatası");
+        cleanup();
+        exit(EXIT_FAILURE);
     }
 
-    int secim;
-    printf("\nArayüz seçin (1-%d): ", aygit_sayisi);
-    scanf("%d", &secim);
+    printf("Gelişmiş Honeypot v2.0 başlatıldı. Port: %d\n", PORT);
+    openlog("honeypot", LOG_PID | LOG_CONS, LOG_USER);
+    syslog(LOG_INFO, "Honeypot başlatıldı");
 
-    if (secim < 1 || secim > aygit_sayisi) {
-        printf("Geçersiz seçim. Çıkılıyor.\n");
-        return 1;
-    }
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
 
-    aygit = tum_aygitlar;
-    for (int i = 1; i < secim; i++) {
-        aygit = aygit->next;
-    }
-
-    snprintf(kayit_dosyasi_adi, sizeof(kayit_dosyasi_adi), "paket_yakala_%ld.csv", time(NULL));
-    kayit_dosyasi = fopen(kayit_dosyasi_adi, "w");
-    if (kayit_dosyasi) {
-        fprintf(kayit_dosyasi, "Zaman,Paket Numarası,Kaynak IP,Hedef IP,Protokol\n");
-    }
-
-    pcap_t *yakala = pcap_open_live(aygit->name, BUFSIZ, 1, 1000, hata_mesaji);
-    if (yakala == NULL) {
-        fprintf(stderr, "Aygıt açılamadı %s: %s\n", aygit->name, hata_mesaji);
-        return 1;
-    }
-
-    printf("Paket filtresi girin (örn: 'tcp', 'udp port 53', 'icmp' veya tümü için Enter): ");
-    char filtre[100];
-    getchar();
-    fgets(filtre, sizeof(filtre), stdin);
-    filtre[strcspn(filtre, "\n")] = 0;
-
-    if (strlen(filtre) > 0) {
-        struct bpf_program fp;
-        if (pcap_compile(yakala, &fp, filtre, 0, PCAP_NETMASK_UNKNOWN) == -1) {
-            fprintf(stderr, "Filtre derleme hatası: %s\n", pcap_geterr(yakala));
-            return 1;
+        if ((new_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len)) < 0) {
+            perror("Bağlantı kabul edilemedi");
+            continue;
         }
-        if (pcap_setfilter(yakala, &fp) == -1) {
-            fprintf(stderr, "Filtre uygulama hatası: %s\n", pcap_geterr(yakala));
-            return 1;
+
+        // Yeni thread oluştur ve bağlantıyı işle
+        pthread_t thread_id;
+        struct sockaddr_in *client_addr_copy = malloc(sizeof(struct sockaddr_in));
+        memcpy(client_addr_copy, &client_addr, sizeof(struct sockaddr_in));
+        
+        if (pthread_create(&thread_id, NULL, (void *)handle_connection, (void *)new_socket) != 0) {
+            perror("Thread oluşturulamadı");
+            close(new_socket);
+            free(client_addr_copy);
+            continue;
         }
-        printf("Filtre uygulandı: %s\n", filtre);
+        pthread_detach(thread_id);
     }
 
-    printf("\n%s üzerinde paket yakalama başlatılıyor...\n", aygit->name);
-    printf("Durdurmak için Ctrl+C'ye basın\n\n");
+    cleanup();
+    return 0;
+}
 
-    while (calisiyor) {
-        pcap_dispatch(yakala, -1, paket_isleyici, NULL);
+void cleanup(void) {
+    if (log_file) fclose(log_file);
+    if (ip_records) free(ip_records);
+    closelog();
+}
+
+void setup_signal_handlers(void) {
+    struct sigaction sa;
+    sa.sa_handler = cleanup;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+// IP yasaklama işlemleri
+void save_banned_ips(void) {
+    FILE *fp = fopen(BANNED_IPS_FILE, "w");
+    if (!fp) return;
+
+    pthread_mutex_lock(&ip_mutex);
+    for (int i = 0; i < ip_record_count; i++) {
+        if (ip_records[i].attempt_count >= BAN_THRESHOLD) {
+            fprintf(fp, "%s %ld %d\n", 
+                ip_records[i].ip, 
+                ip_records[i].last_attempt, 
+                ip_records[i].attempt_count);
+        }
     }
+    pthread_mutex_unlock(&ip_mutex);
+    fclose(fp);
+}
 
-    istatistikleri_yazdir();
+void load_banned_ips(void) {
+    FILE *fp = fopen(BANNED_IPS_FILE, "r");
+    if (!fp) return;
 
-    if (kayit_dosyasi) {
-        printf("\nYakalama kaydı şuraya kaydedildi: %s\n", kayit_dosyasi_adi);
-        fclose(kayit_dosyasi);
+    char ip[INET_ADDRLEN];
+    time_t last_attempt;
+    int attempts;
+
+    while (fscanf(fp, "%s %ld %d", ip, &last_attempt, &attempts) == 3) {
+        if (ip_record_count < MAX_CONNECTIONS) {
+            strcpy(ip_records[ip_record_count].ip, ip);
+            ip_records[ip_record_count].last_attempt = last_attempt;
+            ip_records[ip_record_count].attempt_count = attempts;
+            ip_record_count++;
+        }
     }
-    
-    pcap_close(yakala);
-    pcap_freealldevs(tum_aygitlar);
+    fclose(fp);
+}
+
+int is_ip_banned(const char *ip) {
+    pthread_mutex_lock(&ip_mutex);
+    for (int i = 0; i < ip_record_count; i++) {
+        if (strcmp(ip_records[i].ip, ip) == 0) {
+            if (ip_records[i].attempt_count >= BAN_THRESHOLD) {
+                time_t now = time(NULL);
+                if (now - ip_records[i].last_attempt < BAN_DURATION) {
+                    pthread_mutex_unlock(&ip_mutex);
+                    return 1;
+                } else {
+                    // Ban süresi dolmuş, sıfırla
+                    ip_records[i].attempt_count = 0;
+                }
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&ip_mutex);
     return 0;
 }
