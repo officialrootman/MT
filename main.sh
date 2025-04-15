@@ -1,92 +1,89 @@
-#!/bin/bash
-
-# Ağ Trafiği Analiz Aracı
+# Ağ Trafiği Analiz Aracı (İSH Shell)
 
 # Renkli çıktı için tanımlar
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+$RED = "`e[0;31m"
+$GREEN = "`e[0;32m"
+$YELLOW = "`e[1;33m"
+$NC = "`e[0m" # No Color
 
-# Ana Menü
-function show_menu() {
-    echo -e "${GREEN}=== Ağ Trafiği Analiz Aracı ===${NC}"
-    echo "1) Belirli bir IP adresini filtrele"
-    echo "2) Belirli bir portu filtrele"
-    echo "3) Tüm trafiği kaydet"
-    echo "4) Çıkış"
-    echo -n "Seçiminizi yapın: "
-    read choice
+# Ana Menü Fonksiyonu
+function Show-Menu {
+    Write-Host -ForegroundColor Green "=== Ağ Trafiği Analiz Aracı ==="
+    Write-Host "1) Belirli bir IP adresini filtrele"
+    Write-Host "2) Belirli bir portu filtrele"
+    Write-Host "3) Tüm trafiği kaydet"
+    Write-Host "4) Çıkış"
+    $global:choice = Read-Host "Seçiminizi yapın"
 }
 
-# Trafiği analiz et
-function analyze_traffic() {
-    filter=$1
-    echo -e "${YELLOW}Trafik analiz ediliyor...${NC}"
-    echo -e "${GREEN}tcpdump komutu: tcpdump $filter${NC}"
+# Trafiği analiz et fonksiyonu
+function Analyze-Traffic {
+    param (
+        [string]$Filter
+    )
+    Write-Host -ForegroundColor Yellow "Trafik analiz ediliyor..."
+    Write-Host -ForegroundColor Green "tcpdump komutu: tcpdump $Filter"
     
-    # tcpdump ile trafiği analiz et
-    sudo tcpdump $filter -n -c 100
+    # tcpdump çağrısı
+    Start-Process "tcpdump" -ArgumentList "$Filter -n -c 100" -NoNewWindow -Wait
 }
 
-# Trafiği kaydet
-function save_traffic() {
-    filter=$1
-    output_file="trafik_analizi_$(date +%Y%m%d_%H%M%S).pcap"
-    echo -e "${YELLOW}Trafik kaydediliyor...${NC}"
-    echo -e "${GREEN}tcpdump komutu: tcpdump $filter -w $output_file${NC}"
+# Trafiği kaydet fonksiyonu
+function Save-Traffic {
+    param (
+        [string]$Filter
+    )
+    $outputFile = "trafik_analizi_$((Get-Date -Format 'yyyyMMdd_HHmmss')).pcap"
+    Write-Host -ForegroundColor Yellow "Trafik kaydediliyor..."
+    Write-Host -ForegroundColor Green "tcpdump komutu: tcpdump $Filter -w $outputFile"
     
-    # tcpdump ile trafiği kaydet
-    sudo tcpdump $filter -w $output_file
-    echo -e "${GREEN}Trafik ${output_file} dosyasına kaydedildi.${NC}"
+    # tcpdump çağrısı
+    Start-Process "tcpdump" -ArgumentList "$Filter -w $outputFile" -NoNewWindow -Wait
+    Write-Host -ForegroundColor Green "Trafik $outputFile dosyasına kaydedildi."
 }
 
-while true; do
-    show_menu
-    case $choice in
-        1)
-            echo -n "İzlenecek IP adresini girin: "
-            read ip
-            analyze_traffic "host $ip"
-            ;;
-        2)
-            echo -n "İzlenecek portu girin: "
-            read port
-            analyze_traffic "port $port"
-            ;;
-        3)
-            echo "Kaydedilecek trafiği seçin: "
-            echo "1) Tüm trafik"
-            echo "2) Belirli bir IP adresi"
-            echo "3) Belirli bir port"
-            echo -n "Seçiminizi yapın: "
-            read save_choice
+# Ana döngü
+while ($true) {
+    Show-Menu
+    switch ($choice) {
+        "1" {
+            $ip = Read-Host "İzlenecek IP adresini girin"
+            Analyze-Traffic -Filter "host $ip"
+        }
+        "2" {
+            $port = Read-Host "İzlenecek portu girin"
+            Analyze-Traffic -Filter "port $port"
+        }
+        "3" {
+            Write-Host "Kaydedilecek trafiği seçin:"
+            Write-Host "1) Tüm trafik"
+            Write-Host "2) Belirli bir IP adresi"
+            Write-Host "3) Belirli bir port"
+            $saveChoice = Read-Host "Seçiminizi yapın"
 
-            case $save_choice in
-                1)
-                    save_traffic ""
-                    ;;
-                2)
-                    echo -n "Kaydedilecek IP adresini girin: "
-                    read save_ip
-                    save_traffic "host $save_ip"
-                    ;;
-                3)
-                    echo -n "Kaydedilecek portu girin: "
-                    read save_port
-                    save_traffic "port $save_port"
-                    ;;
-                *)
-                    echo -e "${RED}Geçersiz seçim!${NC}"
-                    ;;
-            esac
-            ;;
-        4)
-            echo -e "${GREEN}Çıkış yapılıyor...${NC}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Geçersiz seçim!${NC}"
-            ;;
-    esac
-done
+            switch ($saveChoice) {
+                "1" {
+                    Save-Traffic -Filter ""
+                }
+                "2" {
+                    $saveIP = Read-Host "Kaydedilecek IP adresini girin"
+                    Save-Traffic -Filter "host $saveIP"
+                }
+                "3" {
+                    $savePort = Read-Host "Kaydedilecek portu girin"
+                    Save-Traffic -Filter "port $savePort"
+                }
+                default {
+                    Write-Host -ForegroundColor Red "Geçersiz seçim!"
+                }
+            }
+        }
+        "4" {
+            Write-Host -ForegroundColor Green "Çıkış yapılıyor..."
+            break
+        }
+        default {
+            Write-Host -ForegroundColor Red "Geçersiz seçim!"
+        }
+    }
+}
